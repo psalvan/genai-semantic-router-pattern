@@ -1,0 +1,40 @@
+# Stack em sa-east-1. VPC/subnet: preenche no .env (SEMANTIC_ROUTER_VPC_ID, SEMANTIC_ROUTER_PUBLIC_SUBNET_ID)
+# ou substitui no parameter_overrides abaixo. O Makefile usa scripts/sam_parameter_overrides.py (lê .env).
+# Primeiro deploy com EC2: make deploy-bootstrap (fase1 EC2 off → publish router → fase2 EC2 on).
+# Depois: make deploy
+
+version = 0.1
+
+# stack_name abaixo é o default para `sam deploy` sem Makefile; com `make deploy` usa-se
+# --stack-name $(ENVIRONMENT)-nvidia-demo e parameter_overrides com Environment=$(ENVIRONMENT).
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "dev-nvidia-demo"
+region = "sa-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+resolve_s3 = true
+fail_on_empty_changeset = false
+parameter_overrides = "Environment=dev SemanticRouterVpcId=vpc-REPLACE SemanticRouterPublicSubnetId=subnet-REPLACE SemanticRouterEc2Enabled=true"
+
+[deploy-router-phase1.deploy.parameters]
+stack_name = "dev-nvidia-demo"
+region = "sa-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+resolve_s3 = true
+fail_on_empty_changeset = false
+parameter_overrides = "Environment=dev SemanticRouterVpcId=vpc-REPLACE SemanticRouterPublicSubnetId=subnet-REPLACE SemanticRouterEc2Enabled=false"
+
+[deploy-router-phase2.deploy.parameters]
+stack_name = "dev-nvidia-demo"
+region = "sa-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+confirm_changeset = true
+resolve_s3 = true
+fail_on_empty_changeset = false
+parameter_overrides = "Environment=dev SemanticRouterVpcId=vpc-REPLACE SemanticRouterPublicSubnetId=subnet-REPLACE SemanticRouterEc2Enabled=true"

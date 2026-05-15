@@ -1,0 +1,63 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "reasoning": {
+      "type": "string",
+      "description": "Campo que o LLM deve usar para explicar sua lógica de atuação sobre a demanda."
+    },
+    "user_response": {
+      "type": "string",
+      "description": "Usar quando precisar de esclarecimento ou dados adicionais do usuário, ou para informar ao usuário sobre as ações tomadas ou propostas."
+    },
+    "next_action": {
+      "type": "string",
+      "enum": [
+        "NEED_MORE_INFO",
+        "PROVIDE_DIRECT_ANSWER",
+        "EXECUTE_TRANSACTION"
+      ],
+      "description": "Próximo passo do fluxo: pedir mais dados, responder diretamente ou executar transação."
+    },
+    "api": {
+      "type": "string",
+      "enum": ["", "transfer_pix_now", "receive_pix_qrcode"],
+      "description": "Nome da API backend quando next_action é EXECUTE_TRANSACTION: transfer_pix_now (Operation Pay) ou receive_pix_qrcode (Operation Receive). String vazia quando não há chamada."
+    },
+    "Operation": {
+      "type": "string",
+      "enum": ["Pay", "Receive"],
+      "description": "PIX operation type: Pay = the user sends money; Receive = the user receives money (charges)."
+    },
+    "TargetDate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["now", "scheduled"],
+          "description": "now = immediate execution; scheduled = scheduled for date/time in scheduled_at."
+        },
+        "scheduled_at": {
+          "type": "string",
+          "description": "Scheduled date and time in ISO 8601 (e.g. 2026-05-13T15:30:00-03:00). When mode is now, use an empty string."
+        }
+      },
+      "required": ["mode", "scheduled_at"]
+    },
+    "Amount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Operation amount in currency minor units (integer, smallest unit)."
+    },
+    "PIX": {
+      "type": "string",
+      "description": "PIX key for payment or transaction identification: email, phone (+55...), CPF/CNPJ digits only, or random key (EVP)."
+    },
+    "PaymentForTo": {
+      "type": "string",
+      "description": "Person or entity name: for Pay, who receives; for Receive, who pays or from whom funds are received, per utterance context."
+    }
+  },
+  "required": ["reasoning", "user_response", "next_action", "api", "Operation", "TargetDate", "Amount", "PIX", "PaymentForTo"]
+}

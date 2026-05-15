@@ -1,0 +1,93 @@
+{
+    "name": "banking_intent_analysis",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "reasoning": {
+          "type": "string",
+          "description": "Campo que o LLM deve usar para explicar sua lógica de atuação sobre a demanda."
+        },
+        "user_response": {
+          "type": "string",
+          "description": "Usar quando precisar de esclarecimento ou dados adicionais do usuário, ou para informar ao usuário sobre as ações tomadas ou propostas."
+        },
+        "next_action": {
+          "type": "string",
+          "enum": [
+            "NEED_MORE_INFO",
+            "PROVIDE_DIRECT_ANSWER",
+            "EXECUTE_TRANSACTION"
+          ],
+          "description": "Próximo passo do fluxo: pedir mais dados, responder diretamente ou executar transação."
+        },
+        "intent_metadata": {
+          "type": "object",
+          "properties": {
+            "primary_intent": {
+              "type": "string",
+              "enum": [
+                "travel_insurance_info",
+                "credit_limit_increase",
+                "annual_fee_query",
+                "lounge_access_rules",
+                "car_rental_insurance",
+                "revolving_credit_interest",
+                "refund_processing_time",
+                "bill_installment_options",
+                "international_withdrawal_fee",
+                "late_payment_penalties",
+                "rewards_points_earning",
+                "cashback_program_info",
+                "account_maintenance_fee"
+              ]
+            },
+            "category": {
+              "type": "string",
+              "enum": [
+                "insurance",
+                "credit_management",
+                "fees_and_charges",
+                "benefits",
+                "transactions",
+                "payments",
+                "loyalty"
+              ]
+            },
+            "confidence_score": {
+              "type": "number",
+              "description": "Confidence level of the analysis from 0 to 1."
+            },
+            "is_premium_service": {
+              "type": "boolean",
+              "description": "Whether the question refers to high-tier products such as Black or Infinite."
+            }
+          },
+          "required": ["primary_intent", "category", "confidence_score", "is_premium_service"],
+          "additionalProperties": false
+        },
+        "response_context": {
+          "type": "object",
+          "properties": {
+            "faq_slug": {
+              "type": "string",
+              "description": "Human-friendly identifier for FAQ CMS lookup."
+            },
+            "requires_authentication": {
+              "type": "boolean",
+              "description": "Whether the customer must be logged in to access the answer."
+            },
+            "urgency_level": {
+              "type": "string",
+              "enum": ["low", "medium", "high"],
+              "description": "Urgency of the request for queue prioritization."
+            }
+          },
+          "required": ["faq_slug", "requires_authentication", "urgency_level"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["reasoning", "user_response", "next_action", "intent_metadata", "response_context"],
+      "additionalProperties": false
+    }
+}

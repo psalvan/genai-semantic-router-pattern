@@ -1,0 +1,6 @@
+# Pinned for reproducible EC2 (Ubuntu 24.04 ARM64) deploys.
+# sentence-transformers pulls torch/transformers; reserve disk + RAM (see README).
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+sentence-transformers==5.4.0
+semantic-router==0.1.12

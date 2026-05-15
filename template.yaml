@@ -1,0 +1,622 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform:
+  - AWS::LanguageExtensions
+  - AWS::Serverless-2016-10-31
+Description: Nvidia demo — WhatsApp webhook pipeline (API Gateway, Lambdas, SQS incl. dispatch-wpp FIFO, S3 rag-context, EC2 semantic-router).
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - uat
+      - prod
+      - poc
+    Description: Prefixo físico {Environment}-nvidia-demo-...
+  SemanticRouterVpcId:
+    Type: String
+    Default: ''
+    Description: VPC do security group da EC2 semantic-router (obrigatório se SemanticRouterEc2Enabled=true).
+  SemanticRouterPublicSubnetId:
+    Type: String
+    Default: ''
+    Description: Subnet pública com rota para IGW (obrigatório se SemanticRouterEc2Enabled=true).
+  SemanticRouterSshCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR para SSH na EC2 (restringir em produção).
+  SemanticRouterInstanceType:
+    Type: String
+    Default: t4g.small
+    Description: Tipo EC2 Graviton (ARM64) para o semantic-router.
+  SemanticRouterKeyName:
+    Type: String
+    Default: ''
+    Description: Key pair EC2 opcional; vazio = só SSM Session Manager.
+  SemanticRouterAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/noble/stable/current/arm64/hvm/ebs-gp3/ami-id
+    Description: AMI Ubuntu 24.04 ARM64 (SSM Canonical).
+  SemanticRouterEc2Enabled:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: false = só bucket S3 de artefactos; make deploy-bootstrap (fase1→publish→fase2).
+  LambdaLogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+      - 1
+      - 3
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 365
+
+Conditions:
+  SemanticRouterHasEc2KeyPair: !Not [!Equals [!Ref SemanticRouterKeyName, '']]
+  SemanticRouterEc2: !Equals [!Ref SemanticRouterEc2Enabled, 'true']
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.13
+    Architectures:
+      - arm64
+    Tracing: Active
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+
+Resources:
+  PipelineLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-nvidia-demo-lambda'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: PipelineDataPlane
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SSMNvidiaDemo
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/nvidia-demo/*
+              - Sid: KMSDecryptSSM
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: '*'
+              - Sid: SQSQueues
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                Resource:
+                  - !GetAtt IngestQueue.Arn
+                  - !GetAtt IngestDlq.Arn
+                  - !GetAtt PreLlmQueue.Arn
+                  - !GetAtt PreLlmDlq.Arn
+                  - !GetAtt PostLlmQueue.Arn
+                  - !GetAtt PostLlmDlq.Arn
+                  - !GetAtt DispatchWppQueue.Arn
+                  - !GetAtt DispatchWppDlq.Arn
+              - Sid: RagBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt RagContextBucket.Arn
+                  - !Sub '${RagContextBucket.Arn}/*'
+
+  HttpxLayer:
+    Type: AWS::Serverless::LayerVersion
+    Metadata:
+      BuildMethod: python3.13
+      BuildArchitecture: arm64
+    Properties:
+      LayerName: !Sub '${Environment}-nvidia-layer-httpx'
+      ContentUri: layers/httpx/
+      CompatibleRuntimes:
+        - python3.13
+      CompatibleArchitectures:
+        - arm64
+
+  IngestDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-nvidia-demo-ingest-dlq'
+      MessageRetentionPeriod: 1209600
+
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-nvidia-demo-ingest'
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestDlq.Arn
+        maxReceiveCount: 5
+
+  PreLlmDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-nvidia-demo-prellm-dlq'
+      MessageRetentionPeriod: 1209600
+
+  PreLlmQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-nvidia-demo-prellm'
+      VisibilityTimeout: 420
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PreLlmDlq.Arn
+        maxReceiveCount: 5
+
+  PostLlmDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-nvidia-demo-postllm-dlq'
+      MessageRetentionPeriod: 1209600
+
+  PostLlmQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-nvidia-demo-postllm'
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PostLlmDlq.Arn
+        maxReceiveCount: 5
+
+  DispatchWppDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      QueueName: !Sub '${Environment}-nvidia-demo-dispatch-wpp-dlq.fifo'
+      MessageRetentionPeriod: 1209600
+
+  DispatchWppQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      FifoQueue: true
+      QueueName: !Sub '${Environment}-nvidia-demo-dispatch-wpp.fifo'
+      ContentBasedDeduplication: false
+      VisibilityTimeout: 90
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DispatchWppDlq.Arn
+        maxReceiveCount: 5
+
+  RagContextBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${Environment}-nvidia-demo-rag-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SemanticRouterArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${Environment}-nvidia-demo-semantic-router-artifacts-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SemanticRouterInstanceRole:
+    Type: AWS::IAM::Role
+    Condition: SemanticRouterEc2
+    Properties:
+      RoleName: !Sub '${Environment}-nvidia-demo-semantic-router-ec2'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: SemanticRouterReadArtifacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListSemanticRouterPrefix
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt SemanticRouterArtifactBucket.Arn
+              - Sid: GetSemanticRouterObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${SemanticRouterArtifactBucket.Arn}/semantic-router/*'
+        - PolicyName: SemanticRouterSsmKey
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GetSmartRouterKeyParameter
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/nvidia-demo/SMART_ROUTER_KEY
+              - Sid: KmsDecryptSecureStringParameters
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: '*'
+
+  SemanticRouterInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: SemanticRouterEc2
+    Properties:
+      Roles:
+        - !Ref SemanticRouterInstanceRole
+
+  SemanticRouterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: SemanticRouterEc2
+    Properties:
+      GroupName: !Sub '${Environment}-nvidia-demo-semantic-router-sg'
+      GroupDescription: !Sub '${Environment} semantic-router SSH + 8000'
+      VpcId: !Ref SemanticRouterVpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SemanticRouterSshCidr
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: FastAPI-8000
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-nvidia-demo-semantic-router-sg'
+
+  SemanticRouterElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: SemanticRouterEc2
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-nvidia-demo-semantic-router-eip'
+
+  SemanticRouterEc2Instance:
+    Type: AWS::EC2::Instance
+    Condition: SemanticRouterEc2
+    Properties:
+      ImageId: !Ref SemanticRouterAmiId
+      InstanceType: !Ref SemanticRouterInstanceType
+      SubnetId: !Ref SemanticRouterPublicSubnetId
+      SecurityGroupIds:
+        - !Ref SemanticRouterSecurityGroup
+      IamInstanceProfile: !Ref SemanticRouterInstanceProfile
+      KeyName: !If
+        - SemanticRouterHasEc2KeyPair
+        - !Ref SemanticRouterKeyName
+        - !Ref AWS::NoValue
+      MetadataOptions:
+        HttpTokens: required
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-nvidia-demo-semantic-router'
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              exec > >(tee /var/log/nvidia-router-user-data.log) 2>&1
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -y
+              apt-get install -y --no-install-recommends ca-certificates curl unzip
+              ARCH="$(uname -m)"
+              case "$ARCH" in
+                aarch64) AWS_CLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;;
+                x86_64)  AWS_CLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;;
+                *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
+              esac
+              curl -fsSL "$AWS_CLI_URL" -o /tmp/awscliv2.zip
+              unzip -q /tmp/awscliv2.zip -d /tmp
+              /tmp/aws/install -i /usr/local/aws-cli -b /usr/local/bin
+              rm -rf /tmp/aws /tmp/awscliv2.zip
+              install -d -m 0755 /etc/demo-router
+              printf '%s\n' 'DEMO_ENVIRONMENT=${DemoEnv}' 'DEMO_AWS_REGION=${AwsRegion}' > /etc/demo-router/instance.env
+              chmod 644 /etc/demo-router/instance.env
+              install -d -m 0755 /tmp/demo-semantic-router
+              set +e
+              aws s3 sync "s3://${ArtifactBucket}/semantic-router/" /tmp/demo-semantic-router/ --region ${AwsRegion}
+              set -e
+              if [ -f /tmp/demo-semantic-router/main.py ]; then
+                chmod +x /tmp/demo-semantic-router/bootstrap.sh
+                /bin/bash /tmp/demo-semantic-router/bootstrap.sh /tmp/demo-semantic-router
+              else
+                echo "main.py missing after s3 sync — run publish-semantic-router then reboot" | tee /var/log/nvidia-router-hint.txt
+              fi
+            - ArtifactBucket: !Ref SemanticRouterArtifactBucket
+              AwsRegion: !Ref AWS::Region
+              DemoEnv: !Ref Environment
+
+  SemanticRouterEipAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Condition: SemanticRouterEc2
+    Properties:
+      AllocationId: !GetAtt SemanticRouterElasticIp.AllocationId
+      InstanceId: !Ref SemanticRouterEc2Instance
+
+  SsmSmartRouterUrl:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${Environment}/nvidia-demo/SMART_ROUTER_URL'
+      Type: String
+      Value: !If
+        - SemanticRouterEc2
+        - !Sub 'http://${SemanticRouterElasticIp.PublicIp}:8000/check-intent'
+        - ' '
+      Description: URL POST do semantic-router (EIP).
+
+  SsmMainLlmApi:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${Environment}/nvidia-demo/main_llm_api'
+      Type: String
+      Value: ' '
+      Description: Base URL OpenAI-compatible (ex. https://api.openai.com/v1); preencher via script.
+
+  SsmMainLlmModel:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${Environment}/nvidia-demo/main_llm_model'
+      Type: String
+      Value: ' '
+      Description: ID do modelo; preencher via script.
+
+  SsmMainLlmTimeout:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${Environment}/nvidia-demo/main_llm_timeout'
+      Type: String
+      Value: ' '
+      Description: Timeout segundos (texto); preencher via script.
+
+  SsmMainLlmApiVersion:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${Environment}/nvidia-demo/main_llm_api_version'
+      Type: String
+      Value: ' '
+      Description: Opcional — query api-version (ex. Azure OpenAI); preencher via script.
+
+  SsmMetaPhoneNumberId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${Environment}/nvidia-demo/meta_phone_number_id'
+      Type: String
+      Value: ' '
+      Description: WhatsApp Cloud API — ID do número Business (Graph). Preencher META_PHONE_NUMBER_ID no .env e make deploy / ssm-string-params.
+
+  DemoHttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      Tags:
+        Name: !Sub '${Environment}-nvidia-demo-http-api'
+
+  WhatsappWebhookTriggerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-nvidia-demo-whatsapp-trigger'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  IntentProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-nvidia-demo-intent-processor'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  LlmHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-nvidia-demo-llm-handler'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  PostLlmConsumerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-nvidia-demo-post-llm'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  DispatchWppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${Environment}-nvidia-demo-dispatch-wpp'
+      RetentionInDays: !Ref LambdaLogRetentionDays
+
+  WhatsappWebhookTrigger:
+    Type: AWS::Serverless::Function
+    DependsOn: WhatsappWebhookTriggerLogGroup
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
+    Properties:
+      FunctionName: !Sub '${Environment}-nvidia-demo-whatsapp-trigger'
+      Role: !GetAtt PipelineLambdaRole.Arn
+      Timeout: 15
+      CodeUri: .
+      Handler: app.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref WhatsappWebhookTriggerLogGroup
+      Environment:
+        Variables:
+          INGEST_QUEUE_URL: !Ref IngestQueue
+      Events:
+        HttpAny:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref DemoHttpApi
+            Path: /
+            Method: ANY
+
+  IntentProcessor:
+    Type: AWS::Serverless::Function
+    DependsOn: IntentProcessorLogGroup
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
+    Properties:
+      FunctionName: !Sub '${Environment}-nvidia-demo-intent-processor'
+      Role: !GetAtt PipelineLambdaRole.Arn
+      Timeout: 60
+      CodeUri: .
+      Handler: app.lambda_handler
+      Layers:
+        - !Ref HttpxLayer
+      LoggingConfig:
+        LogGroup: !Ref IntentProcessorLogGroup
+      Environment:
+        Variables:
+          PRELLM_QUEUE_URL: !Ref PreLlmQueue
+          DISPATCH_WPP_QUEUE_URL: !Ref DispatchWppQueue
+      Events:
+        IngestSqs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  LlmHandler:
+    Type: AWS::Serverless::Function
+    DependsOn: LlmHandlerLogGroup
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
+    Properties:
+      FunctionName: !Sub '${Environment}-nvidia-demo-llm-handler'
+      Role: !GetAtt PipelineLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      CodeUri: .
+      Handler: app.lambda_handler
+      Layers:
+        - !Ref HttpxLayer
+      LoggingConfig:
+        LogGroup: !Ref LlmHandlerLogGroup
+      Environment:
+        Variables:
+          POSTLLM_QUEUE_URL: !Ref PostLlmQueue
+          RAG_BUCKET_NAME: !Ref RagContextBucket
+          RAG_S3_PREFIX: context/
+      Events:
+        PreLlmSqs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PreLlmQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  PostLlmConsumer:
+    Type: AWS::Serverless::Function
+    DependsOn: PostLlmConsumerLogGroup
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
+    Properties:
+      FunctionName: !Sub '${Environment}-nvidia-demo-post-llm'
+      Role: !GetAtt PipelineLambdaRole.Arn
+      Timeout: 30
+      CodeUri: .
+      Handler: app.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref PostLlmConsumerLogGroup
+      Environment:
+        Variables:
+          DISPATCH_WPP_QUEUE_URL: !Ref DispatchWppQueue
+      Events:
+        PostLlmSqs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PostLlmQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  DispatchWpp:
+    Type: AWS::Serverless::Function
+    DependsOn: DispatchWppLogGroup
+    Metadata:
+      BuildMethod: makefile
+      BuildArchitecture: arm64
+    Properties:
+      FunctionName: !Sub '${Environment}-nvidia-demo-dispatch-wpp'
+      Role: !GetAtt PipelineLambdaRole.Arn
+      Timeout: 30
+      CodeUri: .
+      Handler: app.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref DispatchWppLogGroup
+      Events:
+        DispatchWppSqs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DispatchWppQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+Outputs:
+  HttpApiUrl:
+    Description: URL base do HTTP API (webhook).
+    Value: !Sub 'https://${DemoHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}'
+  IngestQueueUrl:
+    Value: !Ref IngestQueue
+  PreLlmQueueUrl:
+    Value: !Ref PreLlmQueue
+  PostLlmQueueUrl:
+    Value: !Ref PostLlmQueue
+  DispatchWppQueueUrl:
+    Description: SQS FIFO para envio outbound WhatsApp (payload ver função dispatch-wpp).
+    Value: !Ref DispatchWppQueue
+  RagContextBucketName:
+    Value: !Ref RagContextBucket
+  SemanticRouterArtifactBucketName:
+    Value: !Ref SemanticRouterArtifactBucket
+  SmartRouterUrlParameter:
+    Value: !Sub '/${Environment}/nvidia-demo/SMART_ROUTER_URL'

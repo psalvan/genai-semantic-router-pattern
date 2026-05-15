@@ -1,0 +1,25 @@
+.aws-sam/
+.env
+.env.local
+.env.*.local
+
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Python tooling / coverage (local only)
+*.egg-info/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# SAM package output (when using sam package / CI)
+/packaged.yaml

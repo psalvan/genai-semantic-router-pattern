@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "reasoning": {
+      "type": "string",
+      "description": "Campo que o LLM deve usar para explicar sua lógica de atuação sobre a demanda."
+    },
+    "user_response": {
+      "type": "string",
+      "description": "Usar quando precisar de esclarecimento ou dados adicionais do usuário, ou para informar ao usuário sobre as ações tomadas ou propostas."
+    },
+    "next_action": {
+      "type": "string",
+      "enum": [
+        "NEED_MORE_INFO",
+        "PROVIDE_DIRECT_ANSWER",
+        "EXECUTE_TRANSACTION"
+      ],
+      "description": "Próximo passo do fluxo: pedir mais dados, responder diretamente ou executar transação."
+    },
+    "api": {
+      "type": "string",
+      "enum": ["", "blockcard"],
+      "description": "Nome da API backend quando next_action é EXECUTE_TRANSACTION: blockcard. String vazia quando não há chamada (NEED_MORE_INFO ou PROVIDE_DIRECT_ANSWER)."
+    },
+    "FraudOn": {
+      "type": "string",
+      "enum": [
+        "WebApp",
+        "BankApp",
+        "Card",
+        "Contactless_Accessory",
+        "TokenWatchPhone"
+      ],
+      "description": "Channel or asset where the fraud occurred or relates to (web app, bank app, card, contactless accessory, token on watch/phone)."
+    },
+    "Type": {
+      "type": "string",
+      "enum": ["Lost", "Stolen", "Cloned", "Unknown"],
+      "description": "Situation type: lost, stolen, cloned card/data, or unknown when it cannot be classified."
+    },
+    "Block": {
+      "type": "boolean",
+      "description": "true if the user requests immediate blocking of the instrument or account; false otherwise."
+    },
+    "card_last_4digit": {
+      "type": "string",
+      "description": "Extract the last 4 digits of the card if the user provides them (e.g., if the user says 'ending in 2345' or 'last digits 8899', fill with '2345' or '8899'). If the user does not provide them, leave as an empty string."
+    },
+    "Amount": {
+      "type": "string",
+      "description": "Textual indication of the amount involved in the fraud (e.g. currency and value). Use an empty string when no amount is mentioned."
+    },
+    "Date": {
+      "type": "string",
+      "description": "When it occurred (prefer ISO 8601 when the date is clear; otherwise free text). Use an empty string when there is no temporal mention."
+    }
+  },
+  "required": ["reasoning", "user_response", "next_action", "api", "FraudOn", "Type", "Block", "card_last_4digit", "Amount", "Date"]
+}
